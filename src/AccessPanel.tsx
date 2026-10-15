@@ -37,6 +37,20 @@ const emptyDraft = (): Draft => permsToDraft([]);
 const when = (value: string | null) =>
   value ? new Date(value).toLocaleString('ru-RU') : '—';
 
+// Generate consistent color for user avatar based on email
+function getUserAvatarColor(email: string): string {
+const colors = [
+  '#f26a21', // orange (primary brand color)
+  '#4c5bd4', // purple
+  '#1b6b34', // green
+  '#946200', // yellow/amber
+  '#c9372c', // red
+  '#0f172a', // dark blue
+];
+const hash = email.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+return colors[hash % colors.length];
+}
+
 function PermPicker({
   draft,
   setDraft,
@@ -317,21 +331,21 @@ export function Access({ request }: { request: Request }) {
           : 'Ожидает';
 
   return (
-    <section className="access">
-      <div className="panel">
+    <section className="access content">
+      <div className="card">
         <div className="panel-heading">
           <div>
             <span className="eyebrow">РАЗГРАНИЧЕНИЕ ПРАВ</span>
             <h2>Новое приглашение</h2>
           </div>
         </div>
-        <p className="muted">
+        <p className="muted" style={{ margin: '0' }}>
           Выберите пул админки и страницы внутри него. Для каждой страницы —
           режим: «только чтение» или «изменение». Ссылка действует 7 дней и
           используется один раз.
         </p>
-        <form onSubmit={inviteUser}>
-          <label className="access-email">
+        <form onSubmit={inviteUser} style={{ marginTop: '16px' }}>
+          <label className="access-email" style={{ display: 'block', marginBottom: '8px' }}>
             Email приглашаемого
             <input
               type="email"
@@ -339,25 +353,28 @@ export function Access({ request }: { request: Request }) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@example.com"
+              style={{ marginTop: '6px' }}
             />
           </label>
-          <PermPicker draft={draft} setDraft={setDraft} />
-          <div className="actions">
+          <div className="pool">
+            <PermPicker draft={draft} setDraft={setDraft} />
+          </div>
+          <div className="act">
             <button className="primary" disabled={busy}>
               <UserPlus size={16} /> {busy ? 'Отправляем…' : 'Отправить приглашение'}
             </button>
           </div>
         </form>
         {result && (
-          <div className="access-invite-link" role="status">
+          <div className="access-invite-link" role="status" style={{ marginTop: '16px', padding: '12px 18px', background: '#f0f9ff', borderRadius: '8px' }}>
             <strong>Ссылка-приглашение {result.emailSent ? 'отправлена на почту' : 'создана'}:</strong>
-            <div className="actions">
-              <input readOnly value={result.url} onFocus={(e) => e.currentTarget.select()} />
+            <div className="act" style={{ marginTop: '8px' }}>
+              <input readOnly value={result.url} onFocus={(e) => e.currentTarget.select()} style={{ flex: 1, marginRight: '8px', padding: '6px 10px' }} />
               <button onClick={() => copy(result.url)}>
                 <Copy size={16} /> Копировать
               </button>
             </div>
-            <small>
+            <small style={{ display: 'block', marginTop: '8px', color: '#64748b' }}>
               Ссылка показывается один раз. Если письмо не ушло — передайте её
               вручную; повторная отправка того же приглашения невозможна.
             </small>
@@ -365,7 +382,7 @@ export function Access({ request }: { request: Request }) {
         )}
       </div>
 
-      <div className="panel">
+      <div className="card">
         <div className="panel-heading">
           <div>
             <span className="eyebrow">УЧЁТНЫЕ ЗАПИСИ</span>
@@ -397,12 +414,28 @@ export function Access({ request }: { request: Request }) {
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.id} className={u.revokedAt ? 'access-revoked' : ''}>
+                <tr key={u.id} className={u.revokedAt ? 'rev' : ''}>
                   <td>
-                    <strong>{u.name || u.email}</strong>
-                    <small>{u.email}</small>
+                    <div className="u">
+                      <div className="av" style={{ background: getUserAvatarColor(u.email) }}>
+                        {(u.name || u.email)[0].toUpperCase()}
+                      </div>
+                      <div>
+                        <strong>{u.name || u.email}</strong>
+                        <small>{u.email}</small>
+                      </div>
+                    </div>
                   </td>
-                  <td className="access-perms">{permSummary(u.permissions)}</td>
+                  <td className="access-perms">
+                    {u.permissions.map((p, i) => (
+                      <React.Fragment key={i}>
+                        {p.mode === 'write' && <span className="chip edit">изм.</span>}
+                        {p.mode === 'read' && <span className="chip read">чт.</span>}
+                        {p.mode !== 'write' && p.mode !== 'read' && <span>{PAGE_LABELS[p.page] || p.page}</span>}
+                        {i < u.permissions.length - 1 && ' · '}
+                      </React.Fragment>
+                    ))}
+                  </td>
                   <td>
                     {u.revokedAt ? (
                       '—'
@@ -418,10 +451,16 @@ export function Access({ request }: { request: Request }) {
                     )}
                   </td>
                   <td>
-                    {u.revokedAt ? 'Доступ отозван' : when(u.lastLoginAt)}
-                    <small>создан {when(u.createdAt)}</small>
+                    {u.revokedAt ? (
+                      <span className="bd no">отозван</span>
+                    ) : (
+                      <>
+                        <div>{when(u.lastLoginAt)}</div>
+                        <small>создан {when(u.createdAt)}</small>
+                      </>
+                    )}
                   </td>
-                  <td className="actions" style={{ whiteSpace: 'nowrap' }}>
+                  <td className="act" style={{ whiteSpace: 'nowrap' }}>
                     {!u.revokedAt && (
                       <button
                         onClick={() => {
@@ -444,7 +483,7 @@ export function Access({ request }: { request: Request }) {
             </tbody>
           </table>
         </div>
-        {!users.length && <p className="empty">{loading ? 'Загружаем…' : 'Пользователей пока нет — отправьте первое приглашение.'}</p>}
+        {!users.length && <p className="muted">{loading ? 'Загружаем…' : 'Пользователей пока нет — отправьте первое приглашение.'}</p>}
 
         {editing && (
           <form className="access-edit" onSubmit={savePerms}>
@@ -471,14 +510,14 @@ export function Access({ request }: { request: Request }) {
         )}
       </div>
 
-      <div className="panel">
+      <div className="card">
         <div className="panel-heading">
           <div>
             <span className="eyebrow">ССЫЛКИ-ПРИГЛАШЕНИЯ</span>
             <h2>Приглашения</h2>
           </div>
         </div>
-        <div className="table-scroll">
+        <div className="tw" style={{ marginTop: '16px' }}>
           <table>
             <thead>
               <tr>
@@ -492,14 +531,22 @@ export function Access({ request }: { request: Request }) {
               {invites.map((i) => (
                 <tr key={i.id}>
                   <td>{i.email}</td>
-                  <td className="access-perms">{permSummary(i.permissions)}</td>
+                  <td className="access-perms">
+                    {i.permissions.map((p, idx) => (
+                      <React.Fragment key={idx}>
+                        {p.mode === 'write' && <span className="chip edit">{PAGE_LABELS[p.page] || p.page} (изм.)</span>}
+                        {p.mode === 'read' && <span className="chip read">{PAGE_LABELS[p.page] || p.page} (чт.)</span>}
+                        {idx < i.permissions.length - 1 && ' · '}
+                      </React.Fragment>
+                    ))}
+                  </td>
                   <td>
-                    <span className={'badge' + (inviteState(i) === 'Ожидает' ? ' warm' : '')}>
+                    <span className={'bd' + (inviteState(i) === 'Ожидает' ? ' wt' : inviteState(i) === 'Принято' ? ' ok' : inviteState(i) === 'Истекло' || inviteState(i) === 'Отозвано' ? ' no' : '')}>
                       {inviteState(i)}
                     </span>
-                    <small>до {when(i.expiresAt)}</small>
+                    <small style={{ display: 'block', marginTop: '4px', color: '#64748b' }}>до {when(i.expiresAt)}</small>
                   </td>
-                  <td className="actions">
+                  <td className="act">
                     {inviteState(i) === 'Ожидает' && (
                       <button className="icon danger" onClick={() => void revokeInvite(i)} disabled={busy} aria-label="Отозвать приглашение">
                         <Trash2 size={16} />
@@ -511,7 +558,7 @@ export function Access({ request }: { request: Request }) {
             </tbody>
           </table>
         </div>
-        {!invites.length && <p className="empty">Приглашений ещё не было.</p>}
+        {!invites.length && <p className="muted" style={{ marginTop: '12px' }}>Приглашений ещё не было.</p>}
       </div>
     </section>
   );
