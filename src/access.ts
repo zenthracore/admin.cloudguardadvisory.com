@@ -6,6 +6,9 @@ export type Perm = {
   mode: PermMode;
 };
 
+/** Editable permission draft: workspace → page → mode ('' means "no access"). */
+export type PermDraft = Record<string, Record<string, PermMode | ''>>;
+
 export type Me = {
   id: number;
   super: boolean;
@@ -47,8 +50,8 @@ export const POOL_PAGES: Record<string, string[]> = {
   monastery: ['dash', 'monasteries', 'bookings', 'waitlist', 'tasks'],
 };
 
-export function permsToDraft(perms: Perm[]): Record<string, Record<string, PermMode | ''>> {
-  const draft: Record<string, Record<string, PermMode | ''>> = {};
+export function permsToDraft(perms: Perm[]): PermDraft {
+  const draft: PermDraft = {};
   for (const [pool, pages] of Object.entries(POOL_PAGES)) {
     draft[pool] = {};
     for (const page of pages) draft[pool][page] = '';
@@ -61,9 +64,7 @@ export function permsToDraft(perms: Perm[]): Record<string, Record<string, PermM
   return draft;
 }
 
-export function draftToPerms(
-  draft: Record<string, Record<string, PermMode | ''>>,
-): Perm[] {
+export function draftToPerms(draft: PermDraft): Perm[] {
   const perms: Perm[] = [];
   for (const [pool, pages] of Object.entries(draft)) {
     for (const [page, mode] of Object.entries(pages)) {

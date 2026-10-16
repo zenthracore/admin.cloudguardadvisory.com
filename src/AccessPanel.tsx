@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Copy, RefreshCw, Trash2, UserPlus, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Copy, RefreshCw, Trash2, UserPlus } from 'lucide-react';
 import {
   PAGE_LABELS,
   POOL_LABELS,
@@ -7,11 +7,14 @@ import {
   draftToPerms,
   permsToDraft,
   type Perm,
+  type PermDraft,
   type PermMode,
 } from './access';
+import { AccessPermPool } from './AccessPermPool';
+import { AccessDrawer } from './AccessDrawer';
 
 type Request = (path: string, init?: RequestInit) => Promise<any>;
-type Draft = Record<string, Record<string, PermMode | ''>>;
+type Toast = { text: string; kind: 'ok' | 'err' };
 type AdminUser = {
   id: number;
   email: string;
@@ -33,104 +36,99 @@ type Invite = {
   revokedAt: string | null;
 };
 
-const emptyDraft = (): Draft => permsToDraft([]);
-const when = (value: string | null) =>
-  value ? new Date(value).toLocaleString('ru-RU') : '—';
+const AVATAR_COLORS = ['#2b8fa8', '#6b5bd2', '#d2623b', '#3b8f5a', '#a14fb0', '#c28a1b'];
 
-// Generate consistent color for user avatar based on email
-function getUserAvatarColor(email: string): string {
-const colors = [
-  '#f26a21', // orange (primary brand color)
-  '#4c5bd4', // purple
-  '#1b6b34', // green
-  '#946200', // yellow/amber
-  '#c9372c', // red
-  '#0f172a', // dark blue
-];
-const hash = email.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-return colors[hash % colors.length];
+const emptyDraft = (): PermDraft => permsToDraft([]);
+const emptyPoolOn = (): Record<string, boolean> => {
+  const on: Record<string, boolean> = {};
+  for (const workspace of Object.keys(POOL_PAGES)) on[workspace] = false;
+  return on;
+};
+const draftToPoolOn = (draft: PermDraft): Record<string, boolean> => {
+  const on: Record<string, boolean> = {};
+  for (const [workspace, pages] of Object.entries(POOL_PAGES)) {
+    on[workspace] = pages.some((page) => draft[workspace]?.[page]);
+  }
+  return on;
+};
+const formToPerms = (draft: PermDraft, poolOn: Record<string, boolean>): Perm[] =>
+  draftToPerms(draft).filter((perm) => poolOn[perm.workspace]);
+const clearPool = (draft: PermDraft, workspace: string): PermDraft => {
+  const pages: Record<string, PermMode | ''> = {};
+  for (const page of POOL_PAGES[workspace]) pages[page] = '';
+  return { ...draft, [workspace]: pages };
+};
+
+// Deterministic avatar color, matching the mock (hash of the display name).
+function avatarColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash += name.charCodeAt(i);
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
 }
+const initial = (value: string) => (value[0] || '?').toUpperCase();
 
-function PermPicker({
-  draft,
-  setDraft,
-}: {
-  draft: Draft;
-  setDraft: (next: Draft) => void;
-}) {
-  const setPage = (pool: string, page: string, mode: PermMode | '') =>
-    setDraft({ ...draft, [pool]: { ...draft[pool], [page]: mode } });
-  const togglePool = (pool: string, on: boolean) => {
-    const pages = { ...draft[pool] };
-    for (const page of POOL_PAGES[pool]) pages[page] = on ? 'write' : '';
-    setDraft({ ...draft, [pool]: pages });
-  };
+const pad = (n: number) => String(n).padStart(2, '0');
+function when(value: string | null): string {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
   return (
-    <div className="perm-grid">
-      {Object.entries(POOL_PAGES).map(([pool, pages]) => {
-        const active = pages.some((page) => draft[pool][page] !== '');
-        return (
-          <section className={'perm-pool' + (active ? ' active' : '')} key={pool}>
-            <header>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={active}
-                  onChange={(e) => togglePool(pool, e.target.checked)}
-                />
-                <strong>{POOL_LABELS[pool]}</strong>
-              </label>
-            </header>
-            <div className="perm-pages">
-              {pages.map((page) => (
-                <label key={page}>
-                  <span>{PAGE_LABELS[page] || page}</span>
-                  <select
-                    value={draft[pool][page]}
-                    onChange={(e) => setPage(pool, page, e.target.value as PermMode | '')}
-                  >
-                    <option value="">Нет доступа</option>
-                    <option value="read">Только чтение</option>
-                    <option value="write">Изменение</option>
-                  </select>
-                </label>
-              ))}
-            </div>
-          </section>
-        );
-      })}
-    </div>
+    `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}, ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   );
 }
 
-function permSummary(perms: Perm[]): string {
-  if (!perms.length) return 'Нет прав';
-  const byPool: Record<string, string[]> = {};
-  for (const perm of perms) {
-    (byPool[perm.workspace] ||= []).push(
-      `${PAGE_LABELS[perm.page] || perm.page}${perm.mode === 'write' ? '' : ' (чтение)'}`,
-    );
-  }
-  return Object.entries(byPool)
-    .map(([pool, pages]) => `${POOL_LABELS[pool] || pool}: ${pages.join(', ')}`)
-    .join(' · ');
+const isPending = (invite: Invite) =>
+  !invite.revokedAt && !invite.acceptedAt && new Date(invite.expiresAt) > new Date();
+
+function inviteState(invite: Invite): { label: string; tone: 'ok' | 'wt' | 'no' } {
+  if (invite.revokedAt) return { label: 'Отозвано', tone: 'no' };
+  if (invite.acceptedAt) return { label: 'Принято', tone: 'ok' };
+  if (new Date(invite.expiresAt) < new Date()) return { label: 'Истекло', tone: 'no' };
+  return { label: 'Ожидает', tone: 'wt' };
 }
 
-// One row: whitelist IP (or CIDR) for projects.cloudguardadvisory.com plus the
-// "allowed" switch. Saved through the admin API, applied by the gateway instantly.
+function PermChips({ perms }: { perms: Perm[] }) {
+  if (!perms.length) return <span className="mu">Нет доступа</span>;
+  return (
+    <>
+      {Object.keys(POOL_PAGES).map((workspace) => {
+        const list = perms.filter((perm) => perm.workspace === workspace);
+        if (!list.length) return null;
+        const order = POOL_PAGES[workspace];
+        list.sort((a, b) => order.indexOf(a.page) - order.indexOf(b.page));
+        return (
+          <div key={workspace}>
+            <div className="pl">{POOL_LABELS[workspace] || workspace}</div>
+            {list.map((perm) => (
+              <span
+                key={perm.page}
+                className={'chip ' + (perm.mode === 'write' ? 'edit' : 'read')}
+              >
+                {(PAGE_LABELS[perm.page] || perm.page) + (perm.mode === 'read' ? ' · чтение' : '')}
+              </span>
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+// IP whitelist (or CIDR) for projects.cloudguardadvisory.com plus the "allowed"
+// switch. Saved through the admin API; the gateway applies it instantly.
 function ProjectsEditor({
   user,
   request,
-  onSaved,
+  notify,
 }: {
   user: AdminUser;
   request: Request;
-  onSaved: () => void;
+  notify: (text: string, kind: 'ok' | 'err') => void;
 }) {
   const [ip, setIp] = useState(user.projectsIp || '');
   const [allowed, setAllowed] = useState(user.projectsAllowed);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
 
   useEffect(() => {
     setIp(user.projectsIp || '');
@@ -140,56 +138,48 @@ function ProjectsEditor({
   const dirty = ip.trim() !== (user.projectsIp || '') || allowed !== user.projectsAllowed;
 
   async function save() {
+    if (allowed && !ip.trim()) {
+      notify('Укажите IP, чтобы разрешить доступ в projects', 'err');
+      return;
+    }
     setBusy(true);
-    setError('');
     try {
       await request(`/users/${user.id}/projects-access`, {
         method: 'PUT',
         body: JSON.stringify({ ip: ip.trim(), allowed }),
       });
-      onSaved();
+      notify('IP-доступ обновлён', 'ok');
     } catch (err) {
-      setError((err as Error).message);
+      notify((err as Error).message, 'err');
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="projects-editor">
-      <label>
-        IP
+    <div className="ipc">
+      <input
+        className="ip"
+        type="text"
+        value={ip}
+        placeholder="1.2.3.4 или CIDR"
+        onChange={(e) => setIp(e.target.value)}
+        disabled={busy}
+        spellCheck={false}
+        aria-label="IP или CIDR"
+      />
+      <button type="button" className="btn sm" disabled={busy || !dirty} onClick={() => void save()}>
+        Сохранить
+      </button>
+      <label className="ck">
         <input
-          type="text"
-          value={ip}
-          placeholder="1.2.3.4 или CIDR"
-          onChange={(e) => setIp(e.target.value)}
+          type="checkbox"
+          checked={allowed}
+          onChange={(e) => setAllowed(e.target.checked)}
           disabled={busy}
-          spellCheck={false}
         />
+        в projects
       </label>
-      <span className="projects-row">
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={allowed}
-            onChange={(e) => setAllowed(e.target.checked)}
-            disabled={busy}
-          />
-          в projects
-        </label>
-        <button
-          className={dirty ? 'primary' : ''}
-          disabled={busy || !dirty}
-          onClick={() => void save()}
-        >
-          {busy ? 'Сохраняем…' : 'Сохранить'}
-        </button>
-      </span>
-      {error && <small className="error">{error}</small>}
-      {!error && allowed && !ip.trim() && (
-        <small className="error">Укажите IP, чтобы разрешить доступ</small>
-      )}
     </div>
   );
 }
@@ -200,22 +190,28 @@ export function Access({ request }: { request: Request }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [toast, setToast] = useState<Toast | null>(null);
+
   const [email, setEmail] = useState('');
-  const [draft, setDraft] = useState<Draft>(emptyDraft());
+  const [draft, setDraft] = useState<PermDraft>(emptyDraft());
+  const [poolOn, setPoolOn] = useState<Record<string, boolean>>(emptyPoolOn());
   const [result, setResult] = useState<{ url: string; emailSent: boolean } | null>(null);
+
   const [editing, setEditing] = useState<AdminUser | null>(null);
-  const [editDraft, setEditDraft] = useState<Draft>(emptyDraft());
+  const [editDraft, setEditDraft] = useState<PermDraft>(emptyDraft());
+  const [editPoolOn, setEditPoolOn] = useState<Record<string, boolean>>(emptyPoolOn());
+  const [confirmRevoke, setConfirmRevoke] = useState<AdminUser | null>(null);
+
+  const notify = (text: string, kind: 'ok' | 'err') => setToast({ text, kind });
 
   async function load() {
     setLoading(true);
-    setError('');
     try {
       const [u, i] = await Promise.all([request('/users'), request('/invites')]);
       setUsers(u.users || []);
       setInvites(i.invites || []);
-    } catch (e) {
-      setError((e as Error).message);
+    } catch (err) {
+      notify((err as Error).message, 'err');
     } finally {
       setLoading(false);
     }
@@ -224,30 +220,66 @@ export function Access({ request }: { request: Request }) {
     void load();
   }, []);
 
-  async function inviteUser(e: React.FormEvent) {
-    e.preventDefault();
-    const perms = draftToPerms(draft);
-    if (!perms.length) {
-      setError('Выберите хотя бы одну страницу и уровень доступа.');
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 2600);
+    return () => clearTimeout(id);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!confirmRevoke) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmRevoke(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [confirmRevoke]);
+
+  function setInvitePage(workspace: string, page: string, mode: PermMode | '') {
+    setDraft((d) => ({ ...d, [workspace]: { ...d[workspace], [page]: mode } }));
+  }
+  function toggleInvitePool(workspace: string, on: boolean) {
+    setPoolOn((o) => ({ ...o, [workspace]: on }));
+    if (!on) setDraft((d) => clearPool(d, workspace));
+  }
+  function setEditPage(workspace: string, page: string, mode: PermMode | '') {
+    setEditDraft((d) => ({ ...d, [workspace]: { ...d[workspace], [page]: mode } }));
+  }
+  function toggleEditPool(workspace: string, on: boolean) {
+    setEditPoolOn((o) => ({ ...o, [workspace]: on }));
+    if (!on) setEditDraft((d) => clearPool(d, workspace));
+  }
+
+  async function inviteUser() {
+    const addr = email.trim();
+    let validation = '';
+    if (!/^\S+@\S+\.\S+$/.test(addr)) validation = 'Введите корректный email.';
+    else if (!Object.values(poolOn).some(Boolean)) validation = 'Выберите пул админки.';
+    else if (!Object.values(draft).some((pages) => Object.values(pages).some(Boolean)))
+      validation = 'Выберите хотя бы одну страницу.';
+    else {
+      const taken = [...users.map((u) => u.email), ...invites.filter(isPending).map((i) => i.email)]
+        .some((value) => value.toLowerCase() === addr.toLowerCase());
+      if (taken) validation = 'Этот email уже приглашён или добавлен.';
+    }
+    if (validation) {
+      setError(validation);
       return;
     }
+    const perms = formToPerms(draft, poolOn);
     setBusy(true);
     setError('');
-    setNotice('');
     setResult(null);
     try {
       const data = await request('/invites', {
         method: 'POST',
-        body: JSON.stringify({ email: email.trim(), permissions: perms }),
+        body: JSON.stringify({ email: addr, permissions: perms }),
       });
       setResult({ url: data.inviteUrl, emailSent: !!data.emailSent });
       setEmail('');
       setDraft(emptyDraft());
-      setNotice(
-        data.emailSent
-          ? 'Приглашение отправлено на почту.'
-          : 'Письмо не отправлено — скопируйте ссылку и передайте её вручную.',
-      );
+      setPoolOn(emptyPoolOn());
+      notify(data.emailSent ? 'Приглашение отправлено' : 'Ссылка создана', 'ok');
       await load();
     } catch (err) {
       setError((err as Error).message);
@@ -256,57 +288,59 @@ export function Access({ request }: { request: Request }) {
     }
   }
 
-  async function savePerms(e: React.FormEvent) {
-    e.preventDefault();
+  function openEdit(user: AdminUser) {
+    const nextDraft = permsToDraft(user.permissions);
+    setEditing(user);
+    setEditDraft(nextDraft);
+    setEditPoolOn(draftToPoolOn(nextDraft));
+    setError('');
+  }
+
+  async function savePerms() {
     if (!editing) return;
-    const perms = draftToPerms(editDraft);
+    const perms = formToPerms(editDraft, editPoolOn);
     if (!perms.length) {
-      setError('Нельзя сохранить пользователя без доступа. Отзовите доступ вместо этого.');
+      notify('Выберите хотя бы одну страницу.', 'err');
       return;
     }
     setBusy(true);
-    setError('');
     try {
       await request(`/users/${editing.id}/permissions`, {
         method: 'PUT',
         body: JSON.stringify({ permissions: perms }),
       });
-      setNotice('Права обновлены. Пользователь войдёт заново со старыми правами.');
+      notify('Права обновлены', 'ok');
       setEditing(null);
       await load();
     } catch (err) {
-      setError((err as Error).message);
+      notify((err as Error).message, 'err');
     } finally {
       setBusy(false);
     }
   }
 
   async function revokeUser(user: AdminUser) {
-    if (!window.confirm(`Отозвать доступ для ${user.email}? Сессии будут завершены сразу.`))
-      return;
+    setConfirmRevoke(null);
     setBusy(true);
-    setError('');
     try {
       await request(`/users/${user.id}/revoke`, { method: 'POST' });
-      setNotice('Доступ отозван.');
+      notify('Доступ отозван', 'ok');
       await load();
     } catch (err) {
-      setError((err as Error).message);
+      notify((err as Error).message, 'err');
     } finally {
       setBusy(false);
     }
   }
 
   async function revokeInvite(invite: Invite) {
-    if (!window.confirm(`Отозвать приглашение для ${invite.email}?`)) return;
     setBusy(true);
-    setError('');
     try {
       await request(`/invites/${invite.id}`, { method: 'DELETE' });
-      setNotice('Приглашение отозвано.');
+      notify('Приглашение отозвано', 'ok');
       await load();
     } catch (err) {
-      setError((err as Error).message);
+      notify((err as Error).message, 'err');
     } finally {
       setBusy(false);
     }
@@ -315,99 +349,111 @@ export function Access({ request }: { request: Request }) {
   async function copy(value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      setNotice('Ссылка скопирована.');
+      notify('Ссылка скопирована', 'ok');
     } catch {
-      setError('Буфер обмена недоступен — скопируйте ссылку вручную.');
+      notify('Буфер обмена недоступен — скопируйте вручную', 'err');
     }
   }
 
-  const inviteState = (i: Invite) =>
-    i.revokedAt
-      ? 'Отозвано'
-      : i.acceptedAt
-        ? 'Принято'
-        : new Date(i.expiresAt) < new Date()
-          ? 'Истекло'
-          : 'Ожидает';
-
   return (
-    <section className="access content">
-      <div className="card">
-        <div className="panel-heading">
+    <section className="access">
+      {toast && (
+        <div className={'toast' + (toast.kind === 'err' ? ' err' : '')} role="status">
+          {toast.text}
+        </div>
+      )}
+
+      <section className="card">
+        <div className="ch">
           <div>
-            <span className="eyebrow">РАЗГРАНИЧЕНИЕ ПРАВ</span>
             <h2>Новое приглашение</h2>
+            <small>Ссылка действует 7 дней и используется один раз.</small>
           </div>
         </div>
-        <p className="muted" style={{ margin: '0' }}>
-          Выберите пул админки и страницы внутри него. Для каждой страницы —
-          режим: «только чтение» или «изменение». Ссылка действует 7 дней и
-          используется один раз.
-        </p>
-        <form onSubmit={inviteUser} style={{ marginTop: '16px' }}>
-          <label className="access-email" style={{ display: 'block', marginBottom: '8px' }}>
+        <div className="cb">
+          <p className="mu" style={{ margin: '0 0 18px' }}>
+            Выберите пул админки и страницы внутри него. Для каждой страницы — режим:
+            «только чтение» или «изменение».
+          </p>
+          <label className="f" htmlFor="invite-email">
             Email приглашаемого
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="name@example.com"
-              style={{ marginTop: '6px' }}
-            />
           </label>
-          <div className="pool">
-            <PermPicker draft={draft} setDraft={setDraft} />
+          <input
+            className="in"
+            id="invite-email"
+            type="email"
+            placeholder="name@example.com"
+            value={email}
+            autoComplete="off"
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          {Object.entries(POOL_PAGES).map(([workspace, pages]) => (
+            <AccessPermPool
+              key={workspace}
+              label={POOL_LABELS[workspace] || workspace}
+              pages={pages}
+              pageLabels={PAGE_LABELS}
+              draft={draft[workspace] || {}}
+              on={!!poolOn[workspace]}
+              onToggle={(on) => toggleInvitePool(workspace, on)}
+              onPage={(page, mode) => setInvitePage(workspace, page, mode)}
+            />
+          ))}
+          <button
+            className="btn p"
+            type="button"
+            disabled={busy}
+            onClick={() => void inviteUser()}
+          >
+            <UserPlus size={16} /> {busy ? 'Отправляем…' : 'Отправить приглашение'}
+          </button>
+          <div className="err" role="alert">
+            {error}
           </div>
-          <div className="act">
-            <button className="primary" disabled={busy}>
-              <UserPlus size={16} /> {busy ? 'Отправляем…' : 'Отправить приглашение'}
-            </button>
-          </div>
-        </form>
-        {result && (
-          <div className="access-invite-link" role="status" style={{ marginTop: '16px', padding: '12px 18px', background: '#f0f9ff', borderRadius: '8px' }}>
-            <strong>Ссылка-приглашение {result.emailSent ? 'отправлена на почту' : 'создана'}:</strong>
-            <div className="act" style={{ marginTop: '8px' }}>
-              <input readOnly value={result.url} onFocus={(e) => e.currentTarget.select()} style={{ flex: 1, marginRight: '8px', padding: '6px 10px' }} />
-              <button onClick={() => copy(result.url)}>
-                <Copy size={16} /> Копировать
-              </button>
+          {result && (
+            <div className="invlink" role="status">
+              <strong>
+                {result.emailSent
+                  ? 'Ссылка-приглашение отправлена на почту:'
+                  : 'Ссылка-приглашение создана:'}
+              </strong>
+              <div className="act">
+                <input
+                  readOnly
+                  value={result.url}
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <button type="button" className="btn sm" onClick={() => void copy(result.url)}>
+                  <Copy size={16} /> Копировать
+                </button>
+              </div>
+              <small>
+                Ссылка показывается один раз. Если письмо не ушло — передайте её вручную.
+              </small>
             </div>
-            <small style={{ display: 'block', marginTop: '8px', color: '#64748b' }}>
-              Ссылка показывается один раз. Если письмо не ушло — передайте её
-              вручную; повторная отправка того же приглашения невозможна.
-            </small>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      </section>
 
-      <div className="card">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">УЧЁТНЫЕ ЗАПИСИ</span>
-            <h2>Пользователи</h2>
-          </div>
-          <button onClick={() => void load()} disabled={loading || busy}>
+      <section className="card">
+        <div className="ch">
+          <h2>Пользователи</h2>
+          <button
+            className="btn"
+            type="button"
+            onClick={() => void load()}
+            disabled={loading || busy}
+          >
             <RefreshCw size={16} className={loading ? 'spin' : ''} /> Обновить
           </button>
         </div>
-        {error && <p className="error" role="alert">{error}</p>}
-        {notice && (
-          <p className="notice" role="status">
-            {notice}
-            <button className="icon" onClick={() => setNotice('')} aria-label="Закрыть уведомление">
-              <X size={16} />
-            </button>
-          </p>
-        )}
-        <div className="table-scroll">
+        <div className="tw">
           <table>
             <thead>
               <tr>
                 <th>Пользователь</th>
                 <th>Права</th>
-                <th>Проекты</th>
+                <th>IP-доступ</th>
                 <th>Вход</th>
                 <th />
               </tr>
@@ -417,107 +463,77 @@ export function Access({ request }: { request: Request }) {
                 <tr key={u.id} className={u.revokedAt ? 'rev' : ''}>
                   <td>
                     <div className="u">
-                      <div className="av" style={{ background: getUserAvatarColor(u.email) }}>
-                        {(u.name || u.email)[0].toUpperCase()}
-                      </div>
+                      <span className="av" style={{ background: avatarColor(u.name || u.email) }}>
+                        {initial(u.name || u.email)}
+                      </span>
                       <div>
-                        <strong>{u.name || u.email}</strong>
+                        <b>{u.name || u.email}</b>
                         <small>{u.email}</small>
                       </div>
                     </div>
                   </td>
-                  <td className="access-perms">
-                    {u.permissions.map((p, i) => (
-                      <React.Fragment key={i}>
-                        {p.mode === 'write' && <span className="chip edit">изм.</span>}
-                        {p.mode === 'read' && <span className="chip read">чт.</span>}
-                        {p.mode !== 'write' && p.mode !== 'read' && <span>{PAGE_LABELS[p.page] || p.page}</span>}
-                        {i < u.permissions.length - 1 && ' · '}
-                      </React.Fragment>
-                    ))}
+                  <td>
+                    <PermChips perms={u.permissions} />
                   </td>
                   <td>
                     {u.revokedAt ? (
-                      '—'
+                      <span className="mu">—</span>
                     ) : (
                       <ProjectsEditor
                         user={u}
                         request={request}
-                        onSaved={() => {
-                          setNotice('Доступ к projects обновлён.');
-                          void load();
+                        notify={(text, kind) => {
+                          notify(text, kind);
+                          if (kind === 'ok') void load();
                         }}
                       />
                     )}
                   </td>
                   <td>
                     {u.revokedAt ? (
-                      <span className="bd no">отозван</span>
+                      <span className="bd no">Доступ отозван</span>
                     ) : (
-                      <>
-                        <div>{when(u.lastLoginAt)}</div>
-                        <small>создан {when(u.createdAt)}</small>
-                      </>
+                      when(u.lastLoginAt)
                     )}
+                    <div className="mu sub">создан {when(u.createdAt)}</div>
                   </td>
-                  <td className="act" style={{ whiteSpace: 'nowrap' }}>
-                    {!u.revokedAt && (
-                      <button
-                        onClick={() => {
-                          setEditing(u);
-                          setEditDraft(permsToDraft(u.permissions));
-                          setError('');
-                        }}
-                      >
-                        Права
-                      </button>
-                    )}
-                    {!u.revokedAt && (
-                      <button className="icon danger" onClick={() => void revokeUser(u)} disabled={busy} aria-label="Отозвать доступ">
-                        <Trash2 size={16} />
-                      </button>
-                    )}
+                  <td>
+                    <div className="act">
+                      {!u.revokedAt && (
+                        <button className="btn sm" type="button" onClick={() => openEdit(u)}>
+                          Права
+                        </button>
+                      )}
+                      {!u.revokedAt && (
+                        <button
+                          className="btn ic"
+                          type="button"
+                          onClick={() => setConfirmRevoke(u)}
+                          disabled={busy}
+                          aria-label={`Отозвать доступ ${u.name || u.email}`}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        {!users.length && <p className="muted">{loading ? 'Загружаем…' : 'Пользователей пока нет — отправьте первое приглашение.'}</p>}
-
-        {editing && (
-          <form className="access-edit" onSubmit={savePerms}>
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">ИЗМЕНИТЬ ПРАВА</span>
-                <h2>{editing.name || editing.email}</h2>
-              </div>
-              <button type="button" onClick={() => setEditing(null)} disabled={busy}>
-                Отмена
-              </button>
-            </div>
-            <PermPicker draft={editDraft} setDraft={setEditDraft} />
-            <div className="actions">
-              <button className="primary" disabled={busy}>
-                {busy ? 'Сохраняем…' : 'Сохранить права'}
-              </button>
-            </div>
-            <small className="muted">
-              После сохранения активные сессии пользователя завершаются —
-              понадобится войти заново.
-            </small>
-          </form>
+        {!users.length && (
+          <p className="mu" style={{ padding: '0 24px 22px' }}>
+            {loading ? 'Загружаем…' : 'Пользователей пока нет — отправьте первое приглашение.'}
+          </p>
         )}
-      </div>
+      </section>
 
-      <div className="card">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">ССЫЛКИ-ПРИГЛАШЕНИЯ</span>
-            <h2>Приглашения</h2>
-          </div>
+      <section className="card">
+        <div className="ch">
+          <h2>Приглашения</h2>
         </div>
-        <div className="tw" style={{ marginTop: '16px' }}>
+        <div className="tw">
           <table>
             <thead>
               <tr>
@@ -528,38 +544,94 @@ export function Access({ request }: { request: Request }) {
               </tr>
             </thead>
             <tbody>
-              {invites.map((i) => (
-                <tr key={i.id}>
-                  <td>{i.email}</td>
-                  <td className="access-perms">
-                    {i.permissions.map((p, idx) => (
-                      <React.Fragment key={idx}>
-                        {p.mode === 'write' && <span className="chip edit">{PAGE_LABELS[p.page] || p.page} (изм.)</span>}
-                        {p.mode === 'read' && <span className="chip read">{PAGE_LABELS[p.page] || p.page} (чт.)</span>}
-                        {idx < i.permissions.length - 1 && ' · '}
-                      </React.Fragment>
-                    ))}
-                  </td>
-                  <td>
-                    <span className={'bd' + (inviteState(i) === 'Ожидает' ? ' wt' : inviteState(i) === 'Принято' ? ' ok' : inviteState(i) === 'Истекло' || inviteState(i) === 'Отозвано' ? ' no' : '')}>
-                      {inviteState(i)}
-                    </span>
-                    <small style={{ display: 'block', marginTop: '4px', color: '#64748b' }}>до {when(i.expiresAt)}</small>
-                  </td>
-                  <td className="act">
-                    {inviteState(i) === 'Ожидает' && (
-                      <button className="icon danger" onClick={() => void revokeInvite(i)} disabled={busy} aria-label="Отозвать приглашение">
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {invites.map((invite) => {
+                const state = inviteState(invite);
+                return (
+                  <tr key={invite.id}>
+                    <td>
+                      <b>{invite.email}</b>
+                    </td>
+                    <td>
+                      <PermChips perms={invite.permissions} />
+                    </td>
+                    <td>
+                      <span className={'bd ' + state.tone}>{state.label}</span>
+                      <div className="mu sub">до {when(invite.expiresAt)}</div>
+                    </td>
+                    <td>
+                      <div className="act">
+                        {state.label === 'Ожидает' && (
+                          <button
+                            className="btn sm"
+                            type="button"
+                            onClick={() => void revokeInvite(invite)}
+                            disabled={busy}
+                          >
+                            Отозвать
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
-        {!invites.length && <p className="muted" style={{ marginTop: '12px' }}>Приглашений ещё не было.</p>}
-      </div>
+        {!invites.length && (
+          <p className="mu" style={{ padding: '0 24px 22px' }}>
+            Приглашений ещё не было.
+          </p>
+        )}
+      </section>
+
+      {editing && (
+        <AccessDrawer
+          user={{
+            name: editing.name || editing.email,
+            email: editing.email,
+            color: avatarColor(editing.name || editing.email),
+            initial: initial(editing.name || editing.email),
+          }}
+          draft={editDraft}
+          poolOn={editPoolOn}
+          busy={busy}
+          onTogglePool={toggleEditPool}
+          onPage={setEditPage}
+          onClose={() => setEditing(null)}
+          onSave={() => void savePerms()}
+        />
+      )}
+
+      {confirmRevoke && (
+        <div
+          className="ov c"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setConfirmRevoke(null);
+          }}
+        >
+          <div className="dlg" role="dialog" aria-modal="true">
+            <h3>Отозвать доступ?</h3>
+            <p className="mu">
+              «{confirmRevoke.name || confirmRevoke.email}» ({confirmRevoke.email}) потеряет
+              доступ, активные сессии завершатся.
+            </p>
+            <div className="act" style={{ marginTop: 18 }}>
+              <button className="btn" type="button" onClick={() => setConfirmRevoke(null)} disabled={busy}>
+                Отмена
+              </button>
+              <button
+                className="btn p"
+                type="button"
+                onClick={() => void revokeUser(confirmRevoke)}
+                disabled={busy}
+              >
+                Отозвать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
