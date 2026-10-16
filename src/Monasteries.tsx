@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Plus, Pencil, Trash2, RefreshCw, Upload, X, ArrowLeft, LayoutGrid, Rows3 } from 'lucide-react';
+import { Plus, Pencil, Trash2, RefreshCw, Upload, LayoutGrid, Rows3, X } from 'lucide-react';
 
 type Request = (path: string, init?: RequestInit) => Promise<any>;
 type Monastery = Record<string, any>;
@@ -14,6 +14,16 @@ const fmtDate = (v: string) =>
     : '—';
 const countryLabel: Record<string, string> = { Italy: 'Италия', Austria: 'Австрия', Slovenia: 'Словения' };
 const bookingStatus: Record<string, string> = { new: 'Новая', confirmed: 'Подтверждена', cancelled: 'Отменена' };
+
+const hueOf = (s: string) => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return h;
+};
+const bgFor = (s: string) => {
+  const h = hueOf(s || 'Monastery');
+  return `linear-gradient(135deg, hsl(${h} 42% 64%), hsl(${(h + 40) % 360} 40% 46%))`;
+};
 
 const jsonFields: [string, string][] = [
   ['facilities', 'Удобства (JSON)'],
@@ -100,18 +110,27 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
   const [featuredOnly, setFeaturedOnly] = useState(false);
   const [audioOnly, setAudioOnly] = useState(false);
   const [page, setPage] = useState(1);
-  const [perPage, setPerPage] = useState(30);
+  const [perPage, setPerPage] = useState(12);
   const [total, setTotal] = useState(0);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [toast, setToast] = useState<{ msg: string; kind: 'ok' | 'err' } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState<Monastery | null>(null);
   const [editing, setEditing] = useState(false);
+  const [formErr, setFormErr] = useState('');
+  const [confirmDel, setConfirmDel] = useState<Monastery | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const generation = useRef(0);
+  const toastTimer = useRef<number | undefined>(undefined);
+
+  function showToast(msg: string, kind: 'ok' | 'err' = 'ok') {
+    setToast({ msg, kind });
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+  }
 
   async function loadStats() {
     try {
@@ -151,7 +170,25 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
   useEffect(() => {
     setPage(1);
   }, [country, featuredOnly, audioOnly, query, perPage]);
+  useEffect(() => {
+    return () => window.clearTimeout(toastTimer.current);
+  }, []);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      if (confirmDel) setConfirmDel(null);
+      else if (form) closeForm();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [form, confirmDel]);
 
+  function openCreate() {
+    if (readonly) return;
+    setFormErr('');
+    setForm(emptyForm());
+    setEditing(false);
+  }
   function openEdit(m: Monastery) {
     if (readonly) return;
     const f = emptyForm();
@@ -165,8 +202,13 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
     f.has_private_bathroom = !!m.has_private_bathroom;
     f.featured = !!m.featured;
     f.id = m.id;
+    setFormErr('');
     setForm(f);
     setEditing(!!m.id);
+  }
+  function closeForm() {
+    setForm(null);
+    setFormErr('');
   }
   function set(k: string, v: any) {
     setForm((prev) => (prev ? { ...prev, [k]: v } : prev));
@@ -174,8 +216,12 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
   async function save(e: React.FormEvent) {
     e.preventDefault();
     if (!form || readonly) return;
+    if (!cs(form.name).trim() || !cs(form.city_name).trim() || !cs(form.country).trim()) {
+      setFormErr('Заполните обязательные поля: название, город, страна.');
+      return;
+    }
     setBusy(true);
-    setError('');
+    setFormErr('');
     const payload: any = {};
     const record = { ...form };
     scalarFields.forEach(([k]) => (payload[k] = record[k] === '' ? null : record[k]));
@@ -189,7 +235,7 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
     for (const [k] of jsonFields) {
       const v = jsonOut(record[k]);
       if (v === undefined) {
-        setError(`Поле «${k}» содержит некорректный JSON.`);
+        setFormErr(`Поле «${k}» содержит некорректный JSON.`);
         setBusy(false);
         return;
       }
@@ -205,25 +251,42 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
         await request('/monasteries', { method: 'POST', body: JSON.stringify(payload) });
       }
       setForm(null);
-      setNotice(editing ? 'Монастырь обновлён.' : 'Монастырь создан.');
+      showToast(editing ? 'Монастырь обновлён.' : 'Монастырь создан.');
       await Promise.all([loadStats(), loadMonasteries()]);
     } catch (err) {
-      setError((err as Error).message);
+      setFormErr((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
-  async function del(m: Monastery) {
-    if (readonly) return;
-    if (!window.confirm(`Удалить «${m.name}»? Действие необратимо.`)) return;
+  async function doDelete() {
+    if (!confirmDel || readonly) return;
     setBusy(true);
-    setError('');
     try {
-      await request(`/monasteries/${encodeURIComponent(m.id)}`, { method: 'DELETE' });
-      setNotice('Монастырь удалён.');
+      await request(`/monasteries/${encodeURIComponent(confirmDel.id)}`, { method: 'DELETE' });
+      setConfirmDel(null);
+      showToast('Монастырь удалён.');
       await Promise.all([loadStats(), loadMonasteries()]);
     } catch (err) {
-      setError((err as Error).message);
+      showToast((err as Error).message, 'err');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function toggleFeatured(m: Monastery) {
+    if (readonly) return;
+    const next = !m.featured;
+    setBusy(true);
+    try {
+      const updated = await request(`/monasteries/${encodeURIComponent(m.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ featured: next }),
+      });
+      setItems((prev) => prev.map((x) => (x.id === m.id ? { ...x, featured: updated?.featured ?? next } : x)));
+      showToast(next ? 'Добавлено в избранное.' : 'Убрано из избранного.');
+      void loadStats();
+    } catch (err) {
+      showToast((err as Error).message, 'err');
     } finally {
       setBusy(false);
     }
@@ -232,7 +295,7 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
     if (readonly) return;
     const file = fileRef.current?.files?.[0];
     if (!file) return;
-    setError('');
+    setFormErr('');
     setUploading(true);
     try {
       const fd = new FormData();
@@ -241,9 +304,9 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Ошибка загрузки (${res.status})`);
       set('image_url', data.url);
-      setNotice('Файл загружен. Сохраните монастырь, чтобы применить фото.');
+      showToast('Файл загружен. Сохраните монастырь, чтобы применить фото.');
     } catch (err) {
-      setError((err as Error).message);
+      setFormErr((err as Error).message);
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = '';
@@ -255,219 +318,46 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
   const from = total === 0 ? 0 : (page - 1) * perPage + 1;
   const to = Math.min(total || 0, page * perPage);
 
-  if (form) {
-    return (
-      <section className="mon">
-        <header className="mon-editor-bar">
-          <div className="mon-editor-bar-left">
-            <button
-              className="icon"
-              onClick={() => setForm(null)}
-              disabled={busy}
-              aria-label="Назад к списку"
-            >
-              <ArrowLeft size={20} />
-            </button>
-            <div>
-              <span className="eyebrow">МОНАСТЫРИ · ITALIA · AUSTRIO · SLOVENIJO</span>
-              <h2>{editing ? cs(form.name) || 'Монастырь' : 'Новый монастырь'}</h2>
-            </div>
-            {editing && <span className="badge warm">ID {form.id}</span>}
-          </div>
-          <div className="actions">
-            <button type="button" onClick={() => setForm(null)} disabled={busy}>
-              Отмена
-            </button>
-            <button className="primary" form="mon-edit-form" disabled={busy || uploading}>
-              {busy ? 'Сохраняем…' : editing ? 'Сохранить изменения' : 'Создать'}
-            </button>
-          </div>
-        </header>
-        <form id="mon-edit-form" className="mon-editor" onSubmit={save}>
-          <div className="mon-editor-main">
-            <fieldset className="mon-section">
-              <legend>Основное</legend>
-              <div className="field-grid">
-                <label>
-                  Название *
-                  <input required value={form.name} onChange={(e) => set('name', e.target.value)} />
-                </label>
-                <label>
-                  Slug
-                  <input value={form.slug} onChange={(e) => set('slug', e.target.value)} placeholder="auto-генерируется" />
-                </label>
-                <label>
-                  Страна *
-                  <select value={form.country} onChange={(e) => set('country', e.target.value)}>
-                    <option value="Italy">Италия</option>
-                    <option value="Austria">Австрия</option>
-                    <option value="Slovenia">Словения</option>
-                  </select>
-                </label>
-                <label>
-                  Город *
-                  <input required value={form.city_name} onChange={(e) => set('city_name', e.target.value)} />
-                </label>
-                <label>
-                  Регион<input value={form.region} onChange={(e) => set('region', e.target.value)} />
-                </label>
-                <label>
-                  Цена от €<input type="number" step="0.01" min="0" value={form.min_price} onChange={(e) => set('min_price', e.target.value)} />
-                </label>
-                <label>
-                  Широта<input value={form.latitude} onChange={(e) => set('latitude', e.target.value)} placeholder="46.00" />
-                </label>
-                <label>
-                  Долгота<input value={form.longitude} onChange={(e) => set('longitude', e.target.value)} placeholder="13.00" />
-                </label>
-              </div>
-            </fieldset>
-
-            <fieldset className="mon-section">
-              <legend>Тексты</legend>
-              <label>
-                Краткое введение
-                <textarea rows={3} value={cs(form.intro)} onChange={(e) => set('intro', e.target.value)} placeholder="Пара предложений для карточки…" />
-              </label>
-              <label>
-                Описание
-                <textarea rows={10} value={cs(form.description)} onChange={(e) => set('description', e.target.value)} placeholder="Полный текст страницы монастыря…" />
-              </label>
-            </fieldset>
-
-            <fieldset className="mon-section">
-              <legend>Проживание и правила</legend>
-              <div className="field-grid">
-                <label>
-                  Номера
-                  <textarea rows={3} value={cs(form.room_notes)} onChange={(e) => set('room_notes', e.target.value)} placeholder="Двухместные номера, общие удобства…" />
-                </label>
-                <label>
-                  Часы работы<input value={cs(form.opening_hours)} onChange={(e) => set('opening_hours', e.target.value)} />
-                </label>
-                <label>
-                  Заезд<input value={cs(form.checkin)} onChange={(e) => set('checkin', e.target.value)} />
-                </label>
-                <label>
-                  Выезд<input value={cs(form.checkout)} onChange={(e) => set('checkout', e.target.value)} />
-                </label>
-                <label>
-                  Комендантский час<input value={cs(form.curfew)} onChange={(e) => set('curfew', e.target.value)} />
-                </label>
-                <label>
-                  Кто управляет<input value={cs(form.operated_by)} onChange={(e) => set('operated_by', e.target.value)} />
-                </label>
-              </div>
-            </fieldset>
-          </div>
-
-          <aside className="mon-editor-side">
-            <label className="mon-photo">
-              <span>Фото обложки</span>
-              <div className="mon-photo-preview">
-                {form.image_url ? (
-                  <img src={cs(form.image_url)} alt="" onError={fallbackImage} />
-                ) : (
-                  <img src={IMG_FALLBACK} alt="" />
-                )}
-              </div>
-              <div className="mon-photo-actions">
-                <input ref={fileRef} type="file" accept="image/*" hidden onChange={uploadImage} />
-                <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading}>
-                  <Upload size={16} /> {uploading ? 'Загружаем…' : 'Загрузить файл'}
-                </button>
-                <input
-                  className="mon-photo-url"
-                  value={form.image_url}
-                  onChange={(e) => set('image_url', e.target.value)}
-                  placeholder="/images/venues/ABA103"
-                />
-              </div>
-            </label>
-
-            <fieldset className="mon-section">
-              <legend>Настройки</legend>
-              <label className="checkbox">
-                <input type="checkbox" checked={form.featured} onChange={(e) => set('featured', e.target.checked)} /> Избранное (на главной)
-              </label>
-              <label className="checkbox">
-                <input type="checkbox" checked={form.has_private_bathroom} onChange={(e) => set('has_private_bathroom', e.target.checked)} /> Своя ванная комната
-              </label>
-            </fieldset>
-
-            <fieldset className="mon-section">
-              <legend>Аудио-экскурсия</legend>
-              <label>
-                Аудио (URL)
-                <input value={cs(form.audio_url)} onChange={(e) => set('audio_url', e.target.value)} placeholder="https://… или /media-files/…" />
-              </label>
-            </fieldset>
-
-            <fieldset className="mon-section">
-              <legend>SEO</legend>
-              <label>
-                SEO title
-                <input value={cs(form.seo_title)} onChange={(e) => set('seo_title', e.target.value)} />
-              </label>
-              <label>
-                SEO description
-                <textarea rows={3} value={cs(form.seo_description)} onChange={(e) => set('seo_description', e.target.value)} />
-              </label>
-            </fieldset>
-
-            <details className="mon-json">
-              <summary>Технические данные (JSON)</summary>
-              {jsonFields.map(([k, label]) => (
-                <label key={k}>
-                  {label}
-                  <textarea rows={2} spellCheck={false} value={cs(form[k])} onChange={(e) => set(k, e.target.value)} placeholder="null / {} / […]" />
-                </label>
-              ))}
-            </details>
-          </aside>
-        </form>
-      </section>
-    );
-  }
+  const thumbStyle = (m: Monastery) => (m.image_url ? undefined : { background: bgFor(cs(m.name)) });
 
   return (
-    <section className="mon">
-      <div className="panel mon-content">
-        <div className="mon-toolbar">
-          <div className="mon-view-toggle" role="group" aria-label="Вид списка">
-            <button
-              className={viewMode === 'grid' ? 'active' : ''}
-              onClick={() => setViewMode('grid')}
-              aria-label="Сетка"
-            >
-              <LayoutGrid size={16} /> Сетка
+    <section className="mcat">
+      <div className="card">
+        <div className="bar">
+          <div className="seg" role="group" aria-label="Вид списка">
+            <button className={viewMode === 'grid' ? 'on' : ''} onClick={() => setViewMode('grid')}>
+              <LayoutGrid size={15} /> Сетка
             </button>
-            <button
-              className={viewMode === 'table' ? 'active' : ''}
-              onClick={() => setViewMode('table')}
-              aria-label="Таблица"
-            >
-              <Rows3 size={16} /> Таблица
+            <button className={viewMode === 'table' ? 'on' : ''} onClick={() => setViewMode('table')}>
+              <Rows3 size={15} /> Таблица
             </button>
           </div>
-          <div className="actions">
-            <button onClick={() => void refresh()} disabled={loading || busy}>
-              <RefreshCw size={16} className={loading ? 'spin' : ''} />
+          <div className="ra">
+            <button className="btn" onClick={() => void refresh()} disabled={loading || busy}>
+              <RefreshCw size={15} className={loading ? 'spin' : ''} />
               {loading ? 'Обновляем…' : 'Обновить'}
             </button>
-            <button className="primary" onClick={() => openEdit({})} disabled={busy} hidden={readonly}>
-              <Plus size={17} /> Добавить монастырь
-            </button>
+            {!readonly && (
+              <button className="btn p" onClick={openCreate} disabled={busy}>
+                <Plus size={16} /> Добавить монастырь
+              </button>
+            )}
           </div>
         </div>
 
-        <div className="filters mon-filters">
-          <label className="mon-search">
-            Поиск<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Название, город, ID…" />
-          </label>
-          <label>
-            Страна
-            <select value={country} onChange={(e) => setCountry(e.target.value)}>
+        <div className="flt">
+          <div className="fg g">
+            <span className="lbl">Поиск</span>
+            <input
+              className="in"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Название, город, ID…"
+            />
+          </div>
+          <div className="fg">
+            <span className="lbl">Страна</span>
+            <select className="in" value={country} onChange={(e) => setCountry(e.target.value)}>
               <option value="all">Все страны</option>
               {countries.map((c) => (
                 <option key={c} value={c}>
@@ -475,110 +365,113 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
                 </option>
               ))}
             </select>
-          </label>
-          <label className="checkbox">
-            <input type="checkbox" checked={featuredOnly} onChange={(e) => setFeaturedOnly(e.target.checked)} /> Избранные
-          </label>
-          <label className="checkbox">
-            <input type="checkbox" checked={audioOnly} onChange={(e) => setAudioOnly(e.target.checked)} /> С аудио
-          </label>
-          <label>
-            На странице
-            <select value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
-              <option value={18}>18</option>
+          </div>
+          <button
+            type="button"
+            className={'tg' + (featuredOnly ? ' on' : '')}
+            onClick={() => setFeaturedOnly((v) => !v)}
+            aria-pressed={featuredOnly}
+          >
+            ★ Избранные
+          </button>
+          <button
+            type="button"
+            className={'tg' + (audioOnly ? ' on' : '')}
+            onClick={() => setAudioOnly((v) => !v)}
+            aria-pressed={audioOnly}
+          >
+            ♪ С аудио
+          </button>
+          <div className="fg">
+            <span className="lbl">На странице</span>
+            <select className="in" value={perPage} onChange={(e) => setPerPage(Number(e.target.value))}>
+              <option value={12}>12</option>
+              <option value={24}>24</option>
               <option value={30}>30</option>
               <option value={60}>60</option>
-              <option value={120}>120</option>
             </select>
-          </label>
-        </div>
-
-        {error && (
-          <p role="alert" className="error">
-            {error}
-          </p>
-        )}
-        {notice && (
-          <p role="status" className="notice">
-            {notice}
-            <button className="icon" onClick={() => setNotice('')} aria-label="Закрыть уведомление">
-              <X size={16} />
-            </button>
-          </p>
-        )}
-
-        <div className="mon-pager">
-          <span>
-            {total === 0 ? 'Ничего не найдено' : `Показано ${from}–${to} из ${total}`}
-            {stats && ` · в базе: ${stats.monasteries}`}
-          </span>
-          <div className="actions">
-            <button disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))} aria-label="Предыдущая страница">
-              ← Назад
-            </button>
-            <span className="mon-pager-page">
-              Стр. {page} из {pages}
-            </span>
-            <button disabled={page >= pages} onClick={() => setPage((p) => p + 1)} aria-label="Следующая страница">
-              Вперёд →
-            </button>
           </div>
         </div>
 
+        {error && (
+          <p className="err" role="alert">
+            {error}
+          </p>
+        )}
+
         {viewMode === 'grid' ? (
-          <div className="mon-grid">
+          <div className="grid">
             {items.map((m) => (
-              <article className="mon-card" key={m.id}>
-                <button className="mon-card-img" onClick={() => openEdit(m)} aria-label={`Открыть ${m.name}`}>
-                  {m.image_url ? (
-                    <img src={cs(m.image_url)} alt="" loading="lazy" onError={fallbackImage} />
-                  ) : (
-                    <img src={IMG_FALLBACK} alt="" />
+              <article className="mc" key={m.id}>
+                <div
+                  className="ph"
+                  style={thumbStyle(m)}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openEdit(m)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') openEdit(m);
+                  }}
+                >
+                  {m.image_url && <img src={cs(m.image_url)} alt="" loading="lazy" onError={fallbackImage} />}
+                  {!readonly && (
+                    <button
+                      type="button"
+                      className={'fv' + (m.featured ? ' on' : '')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void toggleFeatured(m);
+                      }}
+                      disabled={busy}
+                      aria-label={m.featured ? 'Убрать из избранного' : 'Добавить в избранное'}
+                    >
+                      ★
+                    </button>
                   )}
-                  {m.min_price != null && m.min_price !== '' && <span className="mon-price">{money(m.min_price)}</span>}
-                </button>
-                <div className="mon-card-body">
-                  <button className="text-button mon-card-name" onClick={() => openEdit(m)}>
-                    {m.name}
-                  </button>
-                  <p className="mon-card-sub">
+                  {m.min_price != null && m.min_price !== '' && <span className="pr">{money(m.min_price)}</span>}
+                </div>
+                <div className="bd2">
+                  <h3 onClick={() => openEdit(m)}>{m.name}</h3>
+                  <div className="sub">
                     {countryLabel[m.country] || m.country}
                     {m.city_name ? ` · ${m.city_name}` : ''}
-                  </p>
-                  <div className="mon-tags">
-                    {m.featured && <span className="badge warm">★ Избранное</span>}
-                    {m.has_private_bathroom && <span className="badge">Своя ванная</span>}
-                    {m.audio_url && <span className="badge">Аудио-экскурсия</span>}
                   </div>
-                  <div className="mon-card-foot">
-                    <small className="mon-card-id">
-                      {m.id}
-                      <span> · {m.slug}</span>
-                    </small>
-                    <div className="actions">
-                      <button className="icon" onClick={() => openEdit(m)} aria-label="Редактировать" hidden={readonly}>
-                        <Pencil size={16} />
-                      </button>
-                      <button className="icon danger" onClick={() => void del(m)} disabled={busy} aria-label="Удалить" hidden={readonly}>
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
+                  <div className="tags">
+                    {m.featured && <span className="tag fav">Избранное</span>}
+                    {m.has_private_bathroom && <span className="tag">Своя ванная</span>}
+                    {m.audio_url && <span className="tag">Аудио</span>}
                   </div>
+                </div>
+                <div className="ft">
+                  <span className="code">
+                    <b>{m.id}</b> · {m.slug}
+                  </span>
+                  <span className="ibs">
+                    {!readonly && (
+                      <button className="ib" onClick={() => openEdit(m)} aria-label="Редактировать">
+                        <Pencil size={15} />
+                      </button>
+                    )}
+                    {!readonly && (
+                      <button className="ib d" onClick={() => setConfirmDel(m)} disabled={busy} aria-label="Удалить">
+                        <Trash2 size={15} />
+                      </button>
+                    )}
+                  </span>
                 </div>
               </article>
             ))}
           </div>
         ) : (
-          <div className="table-scroll">
+          <div className="tw">
             <table>
               <thead>
                 <tr>
-                  <th>Монастырь</th>
-                  <th>Страна / город</th>
-                  <th>Цена от</th>
-                  <th>Ванная</th>
-                  <th>Избранное</th>
-                  <th>Аудио</th>
+                  <th>Название</th>
+                  <th>Город</th>
+                  <th>Код</th>
+                  <th>Цена</th>
+                  <th>Теги</th>
                   <th />
                 </tr>
               </thead>
@@ -586,35 +479,41 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
                 {items.map((m) => (
                   <tr key={m.id}>
                     <td>
-                      <div className="mon-cell">
-                        {m.image_url && (
-                          <img src={cs(m.image_url)} alt="" loading="lazy" onError={fallbackImage} />
-                        )}
-                        <div>
-                          <button className="text-button" onClick={() => openEdit(m)}>
-                            {m.name}
-                          </button>
-                          <small>
-                            {m.id} · {m.slug}
-                          </small>
-                        </div>
+                      <div className="tn">
+                        <span className="th" style={thumbStyle(m)}>
+                          {m.image_url && <img src={cs(m.image_url)} alt="" loading="lazy" onError={fallbackImage} />}
+                        </span>
+                        <button className="text-button" onClick={() => openEdit(m)}>
+                          {m.name}
+                        </button>
                       </div>
                     </td>
                     <td>
                       {countryLabel[m.country] || m.country}
-                      <small>{m.city_name}</small>
+                      {m.city_name ? ` · ${m.city_name}` : ''}
                     </td>
+                    <td className="code">{m.id}</td>
                     <td>{money(m.min_price)}</td>
-                    <td>{m.has_private_bathroom ? 'Да' : '—'}</td>
-                    <td>{m.featured ? '★' : '—'}</td>
-                    <td>{m.audio_url ? 'есть' : '—'}</td>
-                    <td className="actions" style={{ whiteSpace: 'nowrap' }}>
-                      <button className="icon" onClick={() => openEdit(m)} aria-label="Редактировать" hidden={readonly}>
-                        <Pencil size={16} />
-                      </button>
-                      <button className="icon danger" onClick={() => void del(m)} disabled={busy} aria-label="Удалить" hidden={readonly}>
-                        <Trash2 size={16} />
-                      </button>
+                    <td>
+                      <div className="tags">
+                        {m.featured && <span className="tag fav">Избранное</span>}
+                        {m.audio_url && <span className="tag">Аудио</span>}
+                        {m.has_private_bathroom && <span className="tag">Ванная</span>}
+                      </div>
+                    </td>
+                    <td className="right">
+                      <span className="ibs">
+                        {!readonly && (
+                          <button className="ib" onClick={() => openEdit(m)} aria-label="Редактировать">
+                            <Pencil size={15} />
+                          </button>
+                        )}
+                        {!readonly && (
+                          <button className="ib d" onClick={() => setConfirmDel(m)} disabled={busy} aria-label="Удалить">
+                            <Trash2 size={15} />
+                          </button>
+                        )}
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -622,8 +521,316 @@ export function Monasteries({ request, readonly = false }: { request: Request; r
             </table>
           </div>
         )}
-        {!items.length && <p className="empty">{loading && !items.length ? 'Загружаем список…' : 'По выбранным фильтрам монастырей нет.'}</p>}
+
+        {!items.length && (
+          <p className="empty">{loading ? 'Загружаем список…' : 'По выбранным фильтрам монастырей нет.'}</p>
+        )}
+
+        <div className="meta">
+          <span>
+            {total === 0 ? 'Ничего не найдено' : `Показано ${from}–${to} из ${total}`}
+            {stats && ` · в базе: ${stats.monasteries}`}
+          </span>
+          <div className="pg">
+            <button className="btn" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+              ← Назад
+            </button>
+            <span className="pn">
+              Стр. {page} из {pages}
+            </span>
+            <button className="btn" disabled={page >= pages} onClick={() => setPage((p) => p + 1)}>
+              Вперёд →
+            </button>
+          </div>
+        </div>
       </div>
+
+      {confirmDel && (
+        <div
+          className="ov c"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setConfirmDel(null);
+          }}
+        >
+          <div className="dlg" role="alertdialog" aria-modal="true">
+            <h2>Удалить монастырь?</h2>
+            <p>«{confirmDel.name}» будет удалён без возможности восстановления.</p>
+            <footer>
+              <button className="btn" onClick={() => setConfirmDel(null)} disabled={busy}>
+                Отмена
+              </button>
+              <button className="btn del" onClick={() => void doDelete()} disabled={busy}>
+                {busy ? 'Удаляем…' : 'Удалить'}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {form && (
+        <div
+          className="ov"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !busy) closeForm();
+          }}
+        >
+          <div className="dr" role="dialog" aria-modal="true">
+            <form onSubmit={save}>
+              <div className="dh">
+                <h2>{editing ? 'Редактирование' : 'Новый монастырь'}</h2>
+                <button type="button" className="btn" onClick={closeForm} disabled={busy}>
+                  Отмена
+                </button>
+              </div>
+
+              <div className="db">
+                {formErr && <p className="err">{formErr}</p>}
+
+                <div className="fs">
+                  <div className="lg">Основное</div>
+                  <div className="f2">
+                    <label className="f">
+                      Название *
+                      <input className="in" value={cs(form.name)} onChange={(e) => set('name', e.target.value)} />
+                    </label>
+                    <label className="f">
+                      Город *
+                      <input className="in" value={cs(form.city_name)} onChange={(e) => set('city_name', e.target.value)} />
+                    </label>
+                    <label className="f">
+                      Страна
+                      <select className="in" value={cs(form.country)} onChange={(e) => set('country', e.target.value)}>
+                        <option value="Italy">Италия</option>
+                        <option value="Austria">Австрия</option>
+                        <option value="Slovenia">Словения</option>
+                      </select>
+                    </label>
+                    <label className="f">
+                      Цена от €
+                      <input
+                        className="in"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={cs(form.min_price)}
+                        onChange={(e) => set('min_price', e.target.value)}
+                      />
+                    </label>
+                    <label className="f">
+                      Код (slug)
+                      <input
+                        className="in"
+                        value={cs(form.slug)}
+                        onChange={(e) => set('slug', e.target.value)}
+                        placeholder="auto-генерируется"
+                      />
+                    </label>
+                    <label className="f">
+                      Регион
+                      <input className="in" value={cs(form.region)} onChange={(e) => set('region', e.target.value)} />
+                    </label>
+                    <label className="f">
+                      Широта
+                      <input
+                        className="in"
+                        value={cs(form.latitude)}
+                        onChange={(e) => set('latitude', e.target.value)}
+                        placeholder="46.00"
+                      />
+                    </label>
+                    <label className="f">
+                      Долгота
+                      <input
+                        className="in"
+                        value={cs(form.longitude)}
+                        onChange={(e) => set('longitude', e.target.value)}
+                        placeholder="13.00"
+                      />
+                    </label>
+                  </div>
+                  <div className="tgrow">
+                    <button
+                      type="button"
+                      className={'tg' + (form.featured ? ' on' : '')}
+                      onClick={() => set('featured', !form.featured)}
+                      aria-pressed={!!form.featured}
+                    >
+                      ★ Избранное
+                    </button>
+                    <button
+                      type="button"
+                      className={'tg' + (form.has_private_bathroom ? ' on' : '')}
+                      onClick={() => set('has_private_bathroom', !form.has_private_bathroom)}
+                      aria-pressed={!!form.has_private_bathroom}
+                    >
+                      Своя ванная
+                    </button>
+                  </div>
+                </div>
+
+                <div className="fs">
+                  <div className="lg">Медиа</div>
+                  <div className="mmedia">
+                    <div className="mphoto">
+                      {cs(form.image_url) ? (
+                        <img src={cs(form.image_url)} alt="" onError={fallbackImage} />
+                      ) : (
+                        <div className="ph-ph" style={{ background: bgFor(cs(form.name) || 'Monastery') }} />
+                      )}
+                    </div>
+                    <div className="mmedia-act">
+                      <input ref={fileRef} type="file" accept="image/*" hidden onChange={uploadImage} />
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => fileRef.current?.click()}
+                        disabled={uploading}
+                      >
+                        <Upload size={15} /> {uploading ? 'Загружаем…' : 'Загрузить файл'}
+                      </button>
+                      <label className="f">
+                        Фото (URL)
+                        <input
+                          className="in"
+                          value={cs(form.image_url)}
+                          onChange={(e) => set('image_url', e.target.value)}
+                          placeholder="/images/venues/ABA103"
+                        />
+                      </label>
+                      <label className="f">
+                        Аудио-экскурсия (URL)
+                        <input
+                          className="in"
+                          value={cs(form.audio_url)}
+                          onChange={(e) => set('audio_url', e.target.value)}
+                          placeholder="https://… или /media-files/…"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="fs">
+                  <div className="lg">Тексты</div>
+                  <label className="f">
+                    Краткое введение
+                    <textarea
+                      className="in"
+                      rows={3}
+                      value={cs(form.intro)}
+                      onChange={(e) => set('intro', e.target.value)}
+                      placeholder="Пара предложений для карточки…"
+                    />
+                  </label>
+                  <label className="f">
+                    Описание
+                    <textarea
+                      className="in"
+                      rows={6}
+                      value={cs(form.description)}
+                      onChange={(e) => set('description', e.target.value)}
+                      placeholder="Полный текст страницы монастыря…"
+                    />
+                  </label>
+                </div>
+
+                <div className="fs">
+                  <div className="lg">Проживание и правила</div>
+                  <div className="f2">
+                    <label className="f">
+                      Номера
+                      <textarea
+                        className="in"
+                        rows={3}
+                        value={cs(form.room_notes)}
+                        onChange={(e) => set('room_notes', e.target.value)}
+                        placeholder="Двухместные номера, общие удобства…"
+                      />
+                    </label>
+                    <label className="f">
+                      Часы работы
+                      <input
+                        className="in"
+                        value={cs(form.opening_hours)}
+                        onChange={(e) => set('opening_hours', e.target.value)}
+                      />
+                    </label>
+                    <label className="f">
+                      Заезд
+                      <input className="in" value={cs(form.checkin)} onChange={(e) => set('checkin', e.target.value)} />
+                    </label>
+                    <label className="f">
+                      Выезд
+                      <input className="in" value={cs(form.checkout)} onChange={(e) => set('checkout', e.target.value)} />
+                    </label>
+                    <label className="f">
+                      Комендантский час
+                      <input className="in" value={cs(form.curfew)} onChange={(e) => set('curfew', e.target.value)} />
+                    </label>
+                    <label className="f">
+                      Кто управляет
+                      <input
+                        className="in"
+                        value={cs(form.operated_by)}
+                        onChange={(e) => set('operated_by', e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="fs">
+                  <div className="lg">SEO</div>
+                  <label className="f">
+                    SEO title
+                    <input className="in" value={cs(form.seo_title)} onChange={(e) => set('seo_title', e.target.value)} />
+                  </label>
+                  <label className="f">
+                    SEO description
+                    <textarea
+                      className="in"
+                      rows={3}
+                      value={cs(form.seo_description)}
+                      onChange={(e) => set('seo_description', e.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <details className="mjson">
+                  <summary>Технические данные (JSON)</summary>
+                  {jsonFields.map(([k, label]) => (
+                    <label className="f" key={k}>
+                      {label}
+                      <textarea
+                        className="in"
+                        rows={2}
+                        spellCheck={false}
+                        value={cs(form[k])}
+                        onChange={(e) => set(k, e.target.value)}
+                        placeholder="null / {} / […]"
+                      />
+                    </label>
+                  ))}
+                </details>
+              </div>
+
+              <div className="df">
+                <button type="button" className="btn" onClick={closeForm} disabled={busy}>
+                  Отмена
+                </button>
+                <button className="btn p" disabled={busy || uploading}>
+                  {busy ? 'Сохраняем…' : editing ? 'Сохранить' : 'Создать'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className={'toast' + (toast.kind === 'err' ? ' err' : '')} role="status">
+          {toast.msg}
+        </div>
+      )}
     </section>
   );
 }
