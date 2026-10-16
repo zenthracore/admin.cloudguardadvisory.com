@@ -15,6 +15,7 @@ import { BuddhaLogo } from './components/buddha-logo';
 import { Monasteries, MonasteryBookings, MonasteryWaitlist } from './Monasteries';
 import { MonDash } from './MonDash';
 import { Access } from './AccessPanel';
+import { ChatWidget } from './ChatWidget';
 import { InviteAccept } from './InviteAccept';
 import { canPage, type Me } from './access';
 
@@ -31,6 +32,7 @@ const icons = {
   monasteries: Landmark,
   bookings: CalendarCheck,
   waitlist: Mail,
+  access: KeyRound,
 };
 const workspaceSections: View[] = ['dash', 'monasteries', 'bookings', 'waitlist'];
 
@@ -390,6 +392,7 @@ export default function App() {
           {view === 'waitlist' && <MonasteryWaitlist request={request} />}
         </main>
       </div>
+      <ChatWidget me={me} />
     </div>
   );
 }

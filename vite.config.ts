@@ -52,6 +52,7 @@ export default defineConfig({
       '/api': {
         target: process.env.BACKEND_URL || 'http://localhost:8088',
         changeOrigin: false,
+        ws: true,
       },
     },
   },
