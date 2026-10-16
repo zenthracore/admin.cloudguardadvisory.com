@@ -294,7 +294,7 @@ export default function App() {
           {can('access') && (
             <button
               aria-current={view === 'access' ? 'page' : undefined}
-              className={(view === 'access' ? 'active ' : '') + 'access-entry'}
+              className={view === 'access' ? 'active' : ''}
               onClick={() => setView('access')}
             >
               <KeyRound size={18} />
